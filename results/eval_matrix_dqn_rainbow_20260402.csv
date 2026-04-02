@@ -1,0 +1,13 @@
+agent0,agent1,win_rate_agent0,win_rate_agent1,draw_rate,episodes
+mm,heu,1.0,0.0,0.0,80
+mm,dqnA,1.0,0.0,0.0,80
+mm,dqnB,1.0,0.0,0.0,80
+heu,mm,0.3625,0.6375,0.0,80
+heu,dqnA,1.0,0.0,0.0,80
+heu,dqnB,1.0,0.0,0.0,80
+dqnA,mm,0.0,1.0,0.0,80
+dqnA,heu,0.0,1.0,0.0,80
+dqnA,dqnB,1.0,0.0,0.0,80
+dqnB,mm,0.0,1.0,0.0,80
+dqnB,heu,0.0,1.0,0.0,80
+dqnB,dqnA,0.0,1.0,0.0,80

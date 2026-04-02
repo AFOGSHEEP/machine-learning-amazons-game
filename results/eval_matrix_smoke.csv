@@ -1,0 +1,3 @@
+agent0,agent1,win_rate_agent0,win_rate_agent1,draw_rate,episodes
+rnd,heu,0.1,0.9,0.0,10
+heu,rnd,0.9,0.1,0.0,10

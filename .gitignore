@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Virtual env
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Large training artifacts
+results/models/**/*.pt
+results/models/**/*.pth
+results/models/**/*.ckpt
+results/models/**/*.bin
+
+# Optional logs/cache
+*.log

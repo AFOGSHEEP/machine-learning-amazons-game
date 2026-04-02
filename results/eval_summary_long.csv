@@ -1,0 +1,8 @@
+experiment,episodes,win_rate_agent0,win_rate_agent1,draw_rate
+dqn_long_vs_random,200,0.54,0.46,0.0
+a2c_long_vs_random,200,0.665,0.335,0.0
+ppo_long_vs_random,200,0.61,0.39,0.0
+bc_long_vs_random,200,0.4,0.6,0.0
+az_stage1_vs_random,40,0.5,0.5,0.0
+az_stage2_vs_random,60,0.6,0.4,0.0
+az_stage3_vs_random,40,0.55,0.45,0.0
