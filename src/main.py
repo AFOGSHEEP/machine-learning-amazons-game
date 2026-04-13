@@ -5,6 +5,8 @@ from pprint import pprint
 
 from src.evaluation.evaluate import evaluate_vs_random
 from src.evaluation.evaluate import evaluate_agents
+from src.evaluation.advanced_eval import GeneralizationConfig, run_generalization_benchmark
+from src.evaluation.arena_runner import ArenaConfig, parse_agent_spec, run_arena
 from src.train.train_selfplay import TrainConfig, train_selfplay
 from src.agents.random_agent import RandomAmazonsAgent
 from src.agents.heuristic_agent import HeuristicAmazonsAgent
@@ -102,6 +104,45 @@ def cmd_eval_trained_vs_random(args):
     pprint(out)
 
 
+def cmd_eval_generalization(args):
+    def _builder():
+        return _build_agent_from_model(args.agent_type, args.model, device=args.device)
+
+    seeds = tuple(int(x.strip()) for x in args.seeds.split(",") if x.strip())
+    blocks = tuple(int(x.strip()) for x in args.extra_blocks.split(",") if x.strip())
+    out_csv = run_generalization_benchmark(
+        _builder,
+        GeneralizationConfig(
+            episodes=args.episodes,
+            seeds=seeds,
+            size=args.size,
+            max_turns=args.max_turns,
+            extra_blocks=blocks,
+            out_csv=args.out_csv,
+        ),
+    )
+    print("Generalization evaluation saved:")
+    pprint({"out_csv": out_csv})
+
+
+def cmd_run_arena(args):
+    specs = [parse_agent_spec(raw, device=args.device, az_sims=args.az_sims) for raw in args.agent]
+    summary = run_arena(
+        specs,
+        ArenaConfig(
+            games=args.games,
+            size=args.size,
+            max_turns=args.max_turns,
+            seed=args.seed,
+            mode=args.mode,
+            out_games_csv=args.out_games_csv,
+            out_summary_json=args.out_summary_json,
+        ),
+    )
+    print("Arena finished:")
+    pprint(summary)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Mini Amazons MARL Project")
     sub = parser.add_subparsers(required=True)
@@ -137,6 +178,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_train_dqn.add_argument("--per-beta-start", type=float, default=0.4)
     p_train_dqn.add_argument("--per-beta-end", type=float, default=1.0)
     p_train_dqn.add_argument("--per-beta-anneal-steps", type=int, default=100_000)
+    p_train_dqn.add_argument("--prune-top-k", type=int, default=0, help="Action pruning top-k (0=off)")
+    p_train_dqn.add_argument("--prune-keep-ratio", type=float, default=1.0, help="Action pruning keep ratio")
+    p_train_dqn.add_argument("--reward-mobility-weight", type=float, default=0.0)
+    p_train_dqn.add_argument("--reward-center-weight", type=float, default=0.0)
+    p_train_dqn.add_argument("--metadata-json", type=str, default="results/runs/train_dqn_meta.json")
     p_train_dqn.set_defaults(
         func=lambda a: print(
             train_dqn_selfplay(
@@ -153,6 +199,11 @@ def build_parser() -> argparse.ArgumentParser:
                     per_beta_start=a.per_beta_start,
                     per_beta_end=a.per_beta_end,
                     per_beta_anneal_steps=a.per_beta_anneal_steps,
+                    prune_top_k=a.prune_top_k,
+                    prune_keep_ratio=a.prune_keep_ratio,
+                    reward_mobility_weight=a.reward_mobility_weight,
+                    reward_center_weight=a.reward_center_weight,
+                    metadata_json=a.metadata_json,
                 )
             )
         )
@@ -194,6 +245,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_train_a2c.add_argument("--model-dir", type=str, default="results/models")
     p_train_a2c.add_argument("--log-csv", type=str, default="results/train_a2c_log.csv")
     p_train_a2c.add_argument("--device", type=str, default="cuda")
+    p_train_a2c.add_argument("--prune-top-k", type=int, default=0)
+    p_train_a2c.add_argument("--prune-keep-ratio", type=float, default=1.0)
+    p_train_a2c.add_argument("--reward-mobility-weight", type=float, default=0.0)
+    p_train_a2c.add_argument("--reward-center-weight", type=float, default=0.0)
+    p_train_a2c.add_argument("--metadata-json", type=str, default="results/runs/train_a2c_meta.json")
     p_train_a2c.set_defaults(
         func=lambda a: print(
             train_a2c_selfplay(
@@ -204,6 +260,11 @@ def build_parser() -> argparse.ArgumentParser:
                     model_dir=a.model_dir,
                     log_csv=a.log_csv,
                     device=a.device,
+                    prune_top_k=a.prune_top_k,
+                    prune_keep_ratio=a.prune_keep_ratio,
+                    reward_mobility_weight=a.reward_mobility_weight,
+                    reward_center_weight=a.reward_center_weight,
+                    metadata_json=a.metadata_json,
                 )
             )
         )
@@ -216,6 +277,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_train_ppo.add_argument("--model-dir", type=str, default="results/models")
     p_train_ppo.add_argument("--log-csv", type=str, default="results/train_ppo_log.csv")
     p_train_ppo.add_argument("--device", type=str, default="cuda")
+    p_train_ppo.add_argument("--prune-top-k", type=int, default=0)
+    p_train_ppo.add_argument("--prune-keep-ratio", type=float, default=1.0)
+    p_train_ppo.add_argument("--reward-mobility-weight", type=float, default=0.0)
+    p_train_ppo.add_argument("--reward-center-weight", type=float, default=0.0)
+    p_train_ppo.add_argument("--metadata-json", type=str, default="results/runs/train_ppo_meta.json")
     p_train_ppo.set_defaults(
         func=lambda a: print(
             train_ppo_selfplay(
@@ -226,6 +292,11 @@ def build_parser() -> argparse.ArgumentParser:
                     model_dir=a.model_dir,
                     log_csv=a.log_csv,
                     device=a.device,
+                    prune_top_k=a.prune_top_k,
+                    prune_keep_ratio=a.prune_keep_ratio,
+                    reward_mobility_weight=a.reward_mobility_weight,
+                    reward_center_weight=a.reward_center_weight,
+                    metadata_json=a.metadata_json,
                 )
             )
         )
@@ -300,6 +371,36 @@ def build_parser() -> argparse.ArgumentParser:
     p_eval_trained_vs_random.add_argument("--max-turns", type=int, default=200)
     p_eval_trained_vs_random.add_argument("--device", type=str, default=None, help="e.g. cuda or cpu")
     p_eval_trained_vs_random.set_defaults(func=cmd_eval_trained_vs_random)
+
+    p_eval_gen = sub.add_parser("eval-generalization", help="Evaluate trained agent under domain shifts")
+    p_eval_gen.add_argument("--agent-type", type=str, default="dqn", help="dqn|a2c|ppo|q|az|bc")
+    p_eval_gen.add_argument("--model", type=str, default="results/models/agent0_dqn.pt")
+    p_eval_gen.add_argument("--episodes", type=int, default=100)
+    p_eval_gen.add_argument("--size", type=int, default=6)
+    p_eval_gen.add_argument("--max-turns", type=int, default=200)
+    p_eval_gen.add_argument("--seeds", type=str, default="0,1,2")
+    p_eval_gen.add_argument("--extra-blocks", type=str, default="0,2,4")
+    p_eval_gen.add_argument("--out-csv", type=str, default="results/eval_generalization.csv")
+    p_eval_gen.add_argument("--device", type=str, default=None)
+    p_eval_gen.set_defaults(func=cmd_eval_generalization)
+
+    p_arena = sub.add_parser("run-arena", help="Background-style automated agent arena")
+    p_arena.add_argument(
+        "--agent",
+        action="append",
+        required=True,
+        help="name:kind[:model_or_depth], kind=random|heuristic|minimax|mcts|q|dqn|a2c|ppo|bc|az",
+    )
+    p_arena.add_argument("--games", type=int, default=200)
+    p_arena.add_argument("--mode", type=str, default="pool", choices=["pool", "fixed"])
+    p_arena.add_argument("--size", type=int, default=6)
+    p_arena.add_argument("--max-turns", type=int, default=200)
+    p_arena.add_argument("--seed", type=int, default=42)
+    p_arena.add_argument("--device", type=str, default=None)
+    p_arena.add_argument("--az-sims", type=int, default=80)
+    p_arena.add_argument("--out-games-csv", type=str, default="results/arena_games.csv")
+    p_arena.add_argument("--out-summary-json", type=str, default="results/arena_summary.json")
+    p_arena.set_defaults(func=cmd_run_arena)
 
     return parser
 

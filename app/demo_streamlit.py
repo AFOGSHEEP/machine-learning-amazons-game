@@ -3,7 +3,11 @@ from __future__ import annotations
 from pathlib import Path
 import sys
 import time
+import json
+import subprocess
 from typing import Any
+from urllib import request
+from urllib.error import URLError
 
 import streamlit as st
 import torch
@@ -26,6 +30,7 @@ from src.agents.ppo_agent import PPOAmazonsAgent
 from src.agents.q_learning_agent import TabularQLearningAmazonsAgent
 from src.agents.random_agent import RandomAmazonsAgent
 from src.envs.amazons_env import AmazonsConfig, MiniAmazonsEnv
+from src.train.innovation_utils import save_case_record
 
 
 def render_board_html(board) -> str:
@@ -84,6 +89,58 @@ def model_matches_type(agent_type: str, model_path: str) -> bool:
 
 def filtered_model_choices(agent_type: str, all_models: list[str]) -> list[str]:
     return [m for m in all_models if model_matches_type(agent_type, m)]
+
+
+def list_training_logs() -> list[str]:
+    root = ROOT / "results"
+    if not root.exists():
+        return []
+    out: list[str] = []
+    for p in root.rglob("*log*.csv"):
+        try:
+            out.append(str(p.relative_to(ROOT)).replace("\\", "/"))
+        except ValueError:
+            out.append(str(p))
+    return sorted(set(out))
+
+
+def moving_average(series: pd.Series, window: int = 20) -> pd.Series:
+    if series.empty:
+        return series
+    return series.rolling(window=window, min_periods=1).mean()
+
+
+def call_ollama_review(
+    game_rows: list[dict[str, Any]],
+    model_name: str,
+    endpoint: str = "http://127.0.0.1:11434/api/generate",
+) -> str:
+    if not game_rows:
+        return "暂无对局数据可分析。"
+    recent = game_rows[-20:]
+    prompt = (
+        "你是强化学习棋类实验评审。请基于以下 Mini Amazons 对局日志，"
+        "给出：1) 双方策略特点 2) 关键失误回合 3) 可执行改进建议（3条以内）。\n"
+        f"日志: {json.dumps(recent, ensure_ascii=False)}"
+    )
+    payload = {
+        "model": model_name,
+        "prompt": prompt,
+        "stream": False,
+    }
+    req = request.Request(
+        endpoint,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with request.urlopen(req, timeout=60) as resp:
+            text = resp.read().decode("utf-8")
+            data = json.loads(text)
+            return str(data.get("response", "")).strip() or "模型未返回有效内容。"
+    except URLError as e:
+        return f"Ollama 请求失败: {e}"
 
 
 def load_strength_table() -> tuple[dict[str, float], str]:
@@ -201,10 +258,12 @@ def ensure_state():
         st.session_state.info = {"winner": -1}
         st.session_state.log = []
         st.session_state.history = [([row[:] for row in st.session_state.env.board], 0, 0)]
+        st.session_state.metric_rows = []
         st.session_state.auto_play = False
         st.session_state.auto_remaining = 0
         st.session_state.auto_delay = 0.5
         st.session_state.board_size = 6
+        st.session_state.bg_task = None
 
 
 def reset_game():
@@ -214,6 +273,7 @@ def reset_game():
     st.session_state.info = {"winner": -1}
     st.session_state.log = []
     st.session_state.history = [([row[:] for row in env.board], 0, 0)]
+    st.session_state.metric_rows = []
 
 
 def rebuild_env(size: int):
@@ -225,6 +285,7 @@ def rebuild_env(size: int):
     st.session_state.info = {"winner": -1}
     st.session_state.log = []
     st.session_state.history = [([row[:] for row in st.session_state.env.board], 0, 0)]
+    st.session_state.metric_rows = []
     st.session_state.auto_play = False
     st.session_state.auto_remaining = 0
 
@@ -235,6 +296,7 @@ def step_once(agent0: Any, agent1: Any):
         return
     p = env.current_player
     legal = env.legal_actions(p)
+    legal_n = len(legal)
     if not legal:
         st.session_state.done = True
         st.session_state.info = {"winner": 1 - p}
@@ -256,9 +318,84 @@ def step_once(agent0: Any, agent1: Any):
             "action": action,
             "reward0": rewards[0],
             "reward1": rewards[1],
+            "legal_actions": legal_n,
         }
     )
     st.session_state.history.append(([row[:] for row in env.board], env.turns, env.current_player))
+    size = env.cfg.size
+    block_n = sum(1 for row in env.board for v in row if v == 3)
+    legal0 = len(env.legal_actions(0))
+    legal1 = len(env.legal_actions(1))
+    st.session_state.metric_rows.append(
+        {
+            "turn": env.turns,
+            "reward0": rewards[0],
+            "reward1": rewards[1],
+            "cum_reward0": sum(x["reward0"] for x in st.session_state.log),
+            "cum_reward1": sum(x["reward1"] for x in st.session_state.log),
+            "legal0": legal0,
+            "legal1": legal1,
+            "mobility_gap": legal0 - legal1,
+            "block_ratio": block_n / float(size * size),
+        }
+    )
+
+
+def _start_bg_task(task_name: str, cmd: list[str], log_path: Path) -> None:
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_fp = open(log_path, "w", encoding="utf-8")
+    proc = subprocess.Popen(
+        cmd,
+        cwd=str(ROOT),
+        stdout=log_fp,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    st.session_state.bg_task = {
+        "name": task_name,
+        "cmd": cmd,
+        "pid": proc.pid,
+        "proc": proc,
+        "log_path": str(log_path),
+        "started_at": time.time(),
+    }
+    if "task_history" not in st.session_state:
+        st.session_state.task_history = []
+    st.session_state.task_history.insert(
+        0,
+        {
+            "name": task_name,
+            "pid": proc.pid,
+            "log_path": str(log_path),
+            "started_at": int(time.time()),
+        },
+    )
+
+
+def _render_bg_task_status() -> None:
+    task = st.session_state.get("bg_task")
+    if not task:
+        st.caption("当前没有后台任务")
+        return
+    proc = task.get("proc")
+    status = "running" if proc and proc.poll() is None else f"finished(code={proc.poll() if proc else 'n/a'})"
+    st.write(f"任务: `{task['name']}`")
+    st.write(f"PID: `{task['pid']}` | 状态: `{status}`")
+    st.write(f"日志: `{task['log_path']}`")
+    colx, coly = st.columns(2)
+    with colx:
+        if st.button("刷新任务状态"):
+            st.rerun()
+    with coly:
+        if proc and proc.poll() is None and st.button("停止后台任务"):
+            proc.terminate()
+            st.warning("已发送终止信号")
+            st.rerun()
+    hist = st.session_state.get("task_history", [])
+    if hist:
+        st.caption("最近任务")
+        for h in hist[:5]:
+            st.text(f"{h['name']} | pid={h['pid']} | log={h['log_path']}")
 
 
 def main():
@@ -272,7 +409,7 @@ def main():
         device_default = "cuda" if torch.cuda.is_available() else "cpu"
         device = st.selectbox("推理设备", ["cuda", "cpu"], index=0 if device_default == "cuda" else 1)
         az_sims = st.slider("AZ MCTS simulations", min_value=20, max_value=200, value=80, step=20)
-        page = st.radio("页面", ["对弈", "日志与回放"], index=0)
+        page = st.radio("页面", ["对弈", "日志与回放", "训练监控", "一键实验"], index=0)
 
         board_size = st.selectbox("棋盘大小", [6, 8, 10, 12, 16, 32, 64], index=[6, 8, 10, 12, 16, 32, 64].index(st.session_state.board_size))
         if board_size != st.session_state.board_size:
@@ -445,11 +582,19 @@ def main():
                 st.session_state.auto_play = False
                 st.session_state.auto_remaining = 0
                 st.rerun()
-    else:
+    elif page == "日志与回放":
         st.subheader("日志与回放")
-        st.write(f"总步数记录: {len(st.session_state.history) - 1}")
-        if st.session_state.history:
-            idx = st.slider("回放步号", min_value=0, max_value=len(st.session_state.history) - 1, value=len(st.session_state.history) - 1, step=1)
+        history_len = len(st.session_state.history)
+        st.write(f"总步数记录: {max(0, history_len - 1)}")
+        if history_len == 0:
+            st.info("当前没有可回放数据，请先开局或走一步。")
+        elif history_len == 1:
+            board, turn, cp = st.session_state.history[0]
+            st.markdown(render_board_html(board), unsafe_allow_html=True)
+            st.write(f"回放 turn={turn}, current_player={cp}")
+        else:
+            max_idx = history_len - 1
+            idx = st.slider("回放步号", min_value=0, max_value=max_idx, value=max_idx, step=1)
             board, turn, cp = st.session_state.history[idx]
             st.markdown(render_board_html(board), unsafe_allow_html=True)
             st.write(f"回放 turn={turn}, current_player={cp}")
@@ -457,6 +602,214 @@ def main():
         st.subheader("最近20条动作日志")
         for row in st.session_state.log[-20:]:
             st.text(str(row))
+        if st.session_state.metric_rows:
+            mdf = pd.DataFrame(st.session_state.metric_rows)
+            st.markdown("---")
+            st.subheader("对战曲线")
+            st.line_chart(mdf.set_index("turn")[["cum_reward0", "cum_reward1"]], height=220)
+            st.line_chart(mdf.set_index("turn")[["legal0", "legal1"]], height=220)
+            st.line_chart(mdf.set_index("turn")[["mobility_gap", "block_ratio"]], height=220)
+
+        st.markdown("---")
+        st.subheader("案例追溯与 LLM 评审")
+        case_name = st.text_input("案例文件名", value="latest_case.json")
+        if st.button("保存案例到 results/cases"):
+            out = ROOT / "results" / "cases" / case_name
+            case_id = save_case_record(
+                str(out),
+                metadata={
+                    "board_size": st.session_state.board_size,
+                    "winner": st.session_state.info.get("winner", -1),
+                    "total_turns": st.session_state.env.turns,
+                },
+                steps=st.session_state.log,
+            )
+            st.success(f"案例已保存，case_id={case_id}")
+
+        ollama_model = st.text_input("Ollama 模型名", value="qwen2.5:7b")
+        if st.button("用 Ollama 点评本局"):
+            with st.spinner("正在请求本地 Ollama..."):
+                review = call_ollama_review(st.session_state.log, ollama_model)
+            st.text_area("模型点评", value=review, height=220)
+    elif page == "训练监控":
+        st.subheader("训练监控")
+        logs = list_training_logs()
+        if not logs:
+            st.info("未发现训练日志，请先执行训练任务生成 *log*.csv 文件。")
+        else:
+            selected = st.selectbox("训练日志文件", logs, index=0)
+            path = ROOT / selected
+            try:
+                df = pd.read_csv(path)
+                st.caption(f"数据源: {selected}")
+                st.dataframe(df.tail(20), use_container_width=True, height=220)
+                if "episode" in df.columns:
+                    x = df.set_index("episode")
+                    if {"reward_0", "reward_1"}.issubset(df.columns):
+                        chart_df = pd.DataFrame(
+                            {
+                                "reward0_ma20": moving_average(x["reward_0"], 20),
+                                "reward1_ma20": moving_average(x["reward_1"], 20),
+                            }
+                        )
+                        st.line_chart(chart_df, height=220)
+                    if "winner" in df.columns:
+                        win = (df["winner"] == 0).astype(float)
+                        st.line_chart(pd.DataFrame({"win_rate0_ma50": moving_average(win, 50)}), height=220)
+                    eps_cols = [c for c in ["epsilon_0", "epsilon_1"] if c in df.columns]
+                    if eps_cols:
+                        st.line_chart(x[eps_cols], height=220)
+                    loss_cols = [c for c in ["loss_0", "loss_1"] if c in df.columns]
+                    if loss_cols:
+                        st.line_chart(x[loss_cols], height=220)
+                    ent_cols = [c for c in ["entropy_0", "entropy_1"] if c in df.columns]
+                    if ent_cols:
+                        st.line_chart(x[ent_cols], height=220)
+                    if "turns" in df.columns:
+                        st.line_chart(pd.DataFrame({"turns_ma20": moving_average(x["turns"], 20)}), height=220)
+            except Exception as e:
+                st.error(f"读取训练日志失败: {e}")
+    else:
+        st.subheader("一键实验")
+        st.caption("所有任务都在后台执行，完成后可在训练监控和 results 目录查看产物。")
+        _render_bg_task_status()
+
+        st.markdown("---")
+        st.write("**1) 一键创新训练（DQN）**")
+        dqn_episodes = st.number_input("训练局数", min_value=50, max_value=5000, value=600, step=50)
+        if st.button("启动创新DQN训练"):
+            cmd = [
+                sys.executable,
+                "-m",
+                "src.main",
+                "train-dqn",
+                "--episodes",
+                str(int(dqn_episodes)),
+                "--size",
+                "6",
+                "--max-turns",
+                "200",
+                "--device",
+                "cuda" if torch.cuda.is_available() else "cpu",
+                "--use-per",
+                "--n-step",
+                "3",
+                "--reward-mobility-weight",
+                "0.05",
+                "--reward-center-weight",
+                "0.02",
+                "--prune-top-k",
+                "24",
+                "--prune-keep-ratio",
+                "0.5",
+                "--model-dir",
+                "results/models/dqn_ui_run",
+                "--log-csv",
+                "results/train_dqn_ui_run.csv",
+                "--metadata-json",
+                "results/runs/train_dqn_ui_run_meta.json",
+            ]
+            _start_bg_task("dqn_train_ui", cmd, ROOT / "results" / "runs" / "dqn_train_ui.log")
+            st.success("已启动后台训练")
+            st.rerun()
+
+        st.markdown("---")
+        st.write("**2) 一键 Arena 对战**")
+        arena_games = st.number_input("Arena 对战局数", min_value=20, max_value=2000, value=300, step=20)
+        if st.button("启动 Arena 对战（rnd/heu/mm/dqn）"):
+            cmd = [
+                sys.executable,
+                "-m",
+                "src.main",
+                "run-arena",
+                "--agent",
+                "rnd:random",
+                "--agent",
+                "heu:heuristic",
+                "--agent",
+                "mm:minimax:1",
+                "--agent",
+                "dqn:dqn:results/models/dqn_innovation_run/agent0_dqn.pt",
+                "--games",
+                str(int(arena_games)),
+                "--mode",
+                "pool",
+                "--size",
+                "6",
+                "--max-turns",
+                "200",
+                "--device",
+                "cuda" if torch.cuda.is_available() else "cpu",
+                "--out-games-csv",
+                "results/arena_games_ui.csv",
+                "--out-summary-json",
+                "results/arena_summary_ui.json",
+            ]
+            _start_bg_task("arena_ui", cmd, ROOT / "results" / "runs" / "arena_ui.log")
+            st.success("已启动后台 Arena")
+            st.rerun()
+
+        st.markdown("---")
+        st.write("**3) 一键生成 Arena 分析图**")
+        fig_prefix = st.text_input("图名前缀", value="arena_ui")
+        if st.button("生成 Arena 图（柱状图/箱线图/滚动胜率）"):
+            cmd = [
+                sys.executable,
+                "scripts/plot_arena_results.py",
+                "--games-csv",
+                "results/arena_games_ui.csv",
+                "--summary-json",
+                "results/arena_summary_ui.json",
+                "--out-dir",
+                "results/figures",
+                "--prefix",
+                fig_prefix,
+                "--rolling-window",
+                "30",
+            ]
+            try:
+                out = subprocess.run(cmd, cwd=str(ROOT), capture_output=True, text=True, check=True)
+                st.success("图表生成完成")
+                st.code(out.stdout.strip() or "ok")
+            except subprocess.CalledProcessError as e:
+                st.error("图表生成失败")
+                st.code((e.stdout or "") + "\n" + (e.stderr or ""))
+        st.markdown("---")
+        st.write("**4) 单按钮全流程（训练 -> Arena -> 自动出图）**")
+        p_episodes = st.number_input("全流程训练局数", min_value=100, max_value=5000, value=400, step=50)
+        p_games = st.number_input("全流程 Arena 局数", min_value=50, max_value=2000, value=200, step=50)
+        p_prefix = st.text_input("全流程图名前缀", value="arena_pipeline")
+        if st.button("启动全流程"):
+            cmd = [
+                sys.executable,
+                "scripts/run_full_pipeline.py",
+                "--episodes",
+                str(int(p_episodes)),
+                "--arena-games",
+                str(int(p_games)),
+                "--device",
+                "cuda" if torch.cuda.is_available() else "cpu",
+                "--prefix",
+                p_prefix,
+            ]
+            _start_bg_task("full_pipeline_ui", cmd, ROOT / "results" / "runs" / "full_pipeline_ui.log")
+            st.success("已启动全流程后台任务")
+            st.rerun()
+
+        st.markdown("---")
+        st.write("**结果快捷入口**")
+        st.code(
+            "\n".join(
+                [
+                    "results/train_dqn_ui_run.csv",
+                    "results/arena_games_ui.csv",
+                    "results/arena_summary_ui.json",
+                    f"results/figures/{fig_prefix}_winrate_bars.png",
+                    f"results/figures/{fig_prefix}_turns_boxplot.png",
+                    f"results/figures/{fig_prefix}_rolling_winrate.png",
+                ]
+            )
+        )
 
     if (
         st.session_state.auto_play

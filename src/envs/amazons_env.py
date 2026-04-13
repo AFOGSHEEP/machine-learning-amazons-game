@@ -18,6 +18,10 @@ Action = Tuple[int, int, int, int, int, int]
 class AmazonsConfig:
     size: int = 6
     max_turns: int = 200
+    step_penalty: float = -0.001
+    terminal_reward: float = 1.0
+    reward_mobility_weight: float = 0.0
+    reward_center_weight: float = 0.0
 
 
 class MiniAmazonsEnv:
@@ -60,6 +64,33 @@ class MiniAmazonsEnv:
         flat.append(self.current_player)
         return tuple(flat)
 
+    def _center_score(self, pos: Tuple[int, int]) -> float:
+        s = self.cfg.size
+        c = (s - 1) / 2.0
+        dr = abs(pos[0] - c)
+        dc = abs(pos[1] - c)
+        # Normalize to [0, 1], larger is better (closer to center).
+        norm = max(1.0, c * 2.0)
+        return 1.0 - ((dr + dc) / norm)
+
+    def _mobility(self, player: int) -> int:
+        return len(self.legal_actions(player))
+
+    def _reward_shaping(self, player: int) -> float:
+        if self.cfg.reward_mobility_weight == 0.0 and self.cfg.reward_center_weight == 0.0:
+            return 0.0
+        opp = 1 - player
+        self_m = self._mobility(player)
+        opp_m = self._mobility(opp)
+        mobility_term = 0.0
+        if self_m + opp_m > 0:
+            mobility_term = (self_m - opp_m) / float(self_m + opp_m)
+        center_term = self._center_score(self.positions[player]) - self._center_score(self.positions[opp])
+        return (
+            self.cfg.reward_mobility_weight * mobility_term
+            + self.cfg.reward_center_weight * center_term
+        )
+
     def legal_actions(self, player: int | None = None) -> List[Action]:
         p = self.current_player if player is None else player
         r, c = self.positions[p]
@@ -84,8 +115,8 @@ class MiniAmazonsEnv:
             # Illegal action loses immediately.
             winner = 1 - player
             done = True
-            rewards = {0: -1.0, 1: -1.0}
-            rewards[winner] = 1.0
+            rewards = {0: -self.cfg.terminal_reward, 1: -self.cfg.terminal_reward}
+            rewards[winner] = self.cfg.terminal_reward
             return self.get_obs(), rewards, done, {"winner": winner, "illegal": True}
 
         fr, fc, tr, tc, ar, ac = action
@@ -104,15 +135,17 @@ class MiniAmazonsEnv:
         if not next_legal:
             winner = player
             done = True
-            rewards = {0: -1.0, 1: -1.0}
-            rewards[winner] = 1.0
+            rewards = {0: -self.cfg.terminal_reward, 1: -self.cfg.terminal_reward}
+            rewards[winner] = self.cfg.terminal_reward
             return self.get_obs(), rewards, done, {"winner": winner, "illegal": False}
 
         if self.turns >= self.cfg.max_turns:
             return self.get_obs(), {0: 0.0, 1: 0.0}, True, {"winner": -1, "illegal": False}
 
-        # Small step penalty to shorten games.
-        return self.get_obs(), {0: -0.001, 1: -0.001}, False, {"winner": -1, "illegal": False}
+        # Base step penalty + optional reward shaping for both players.
+        r0 = self.cfg.step_penalty + self._reward_shaping(0)
+        r1 = self.cfg.step_penalty + self._reward_shaping(1)
+        return self.get_obs(), {0: r0, 1: r1}, False, {"winner": -1, "illegal": False}
 
     def render(self) -> str:
         mapper = {EMPTY: ".", P0: "A", P1: "B", BLOCK: "x"}
@@ -142,3 +175,29 @@ class MiniAmazonsEnv:
                 nc += dc
 
         return moves
+
+    def estimate_action_score(self, action: Action, player: int) -> float:
+        """
+        Lightweight heuristic score for action pruning:
+        mobility advantage after move + center control.
+        """
+        fr, fc, tr, tc, ar, ac = action
+        board = copy.deepcopy(self.board)
+        piece = P0 if player == 0 else P1
+        opp_piece = P1 if player == 0 else P0
+
+        board[fr][fc] = EMPTY
+        board[tr][tc] = piece
+        board[ar][ac] = BLOCK
+
+        pos_self = (tr, tc)
+        pos_opp = self.positions[1 - player]
+
+        def _ray_count(r: int, c: int) -> int:
+            return len(self._ray_moves(r, c, board=board))
+
+        m_self = _ray_count(pos_self[0], pos_self[1])
+        m_opp = _ray_count(pos_opp[0], pos_opp[1]) if board[pos_opp[0]][pos_opp[1]] == opp_piece else 0
+        mobility_adv = (m_self - m_opp) / float(max(1, m_self + m_opp))
+        center_adv = self._center_score(pos_self) - self._center_score(pos_opp)
+        return 0.7 * mobility_adv + 0.3 * center_adv

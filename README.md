@@ -91,6 +91,15 @@ python -m src.main train-a2c --episodes 2000 --size 6 --max-turns 200
 python -m src.main train-ppo --episodes 2000 --size 6 --max-turns 200
 ```
 
+创新增强开关（奖励重构 + 动作剪枝）示例：
+
+```bash
+python -m src.main train-dqn --episodes 1200 --use-per --n-step 3 \
+  --reward-mobility-weight 0.05 --reward-center-weight 0.02 \
+  --prune-top-k 24 --prune-keep-ratio 0.5 \
+  --metadata-json results/runs/train_dqn_innovation_meta.json
+```
+
 前沿 DQN（优先经验回放 PER + n 步回报，Huber TD 损失）：
 
 ```bash
@@ -138,6 +147,68 @@ python scripts/plot_eval_matrix.py --csv results/eval_matrix.csv --out results/f
 python scripts/plot_deep_training.py --dqn-csv results/train_dqn_long_gpu.csv --a2c-csv results/train_a2c_long_gpu.csv --ppo-csv results/train_ppo_long_gpu.csv --window 100 --out results/figures/deep_training_compare_long.png
 python scripts/plot_vs_random_bars.py --csv results/eval_summary_long.csv --out results/figures/vs_random_winrate_bars.png
 python scripts/plot_matrix_row_ranking.py --csv results/eval_matrix_long_models_n30.csv --out results/figures/eval_matrix_long_n30_row_ranking.png
+```
+
+多随机种子训练（统计稳定性）：
+
+```bash
+python scripts/run_multiseed_training.py --algo dqn --seeds 0,1,2,3,4 --episodes 800 \
+  --prune-top-k 24 --reward-mobility-weight 0.05 --reward-center-weight 0.02 \
+  --out-csv results/multiseed_dqn_summary.csv
+```
+
+泛化实验（随机障碍扰动）：
+
+```bash
+python -m src.main eval-generalization --agent-type dqn --model results/models/agent0_dqn.pt \
+  --episodes 80 --seeds 0,1,2 --extra-blocks 0,2,4 --out-csv results/eval_generalization.csv
+```
+
+后台自动对弈 Arena（指定/任意智能体互相对战）：
+
+```bash
+# 对战池模式：每局随机抽两个智能体，自动互打
+python -m src.main run-arena \
+  --agent rnd:random \
+  --agent heu:heuristic \
+  --agent mm:minimax:1 \
+  --agent dqn:dqn:results/models/dqn_innovation_run/agent0_dqn.pt \
+  --agent a2c:a2c:results/models/a2c_seed0/agent0_a2c.pt \
+  --games 300 --mode pool --size 6 --max-turns 200 --device cuda \
+  --out-games-csv results/arena_games.csv \
+  --out-summary-json results/arena_summary.json
+
+# 固定轮转模式：按 agent 列表顺序轮换对战
+python -m src.main run-arena \
+  --agent dqn:dqn:results/models/dqn_innovation_run/agent0_dqn.pt \
+  --agent mm:minimax:1 \
+  --games 200 --mode fixed --device cuda
+```
+
+Arena 结果产物：
+- `results/arena_games.csv`：逐局记录（white/black/winner/turns）
+- `results/arena_summary.json`：每个智能体的 win_rate/draw_rate/avg_turns 汇总
+
+Arena 结果可视化（答辩推荐）：
+
+```bash
+python scripts/plot_arena_results.py \
+  --games-csv results/arena_games.csv \
+  --summary-json results/arena_summary.json \
+  --out-dir results/figures \
+  --prefix arena_main \
+  --rolling-window 30
+```
+
+输出图：
+- `results/figures/arena_main_winrate_bars.png`
+- `results/figures/arena_main_turns_boxplot.png`
+- `results/figures/arena_main_rolling_winrate.png`
+
+一键全流程（训练 -> Arena -> 出图）：
+
+```bash
+python scripts/run_full_pipeline.py --episodes 400 --arena-games 200 --device cuda --prefix arena_pipeline
 ```
 
 ## 说明

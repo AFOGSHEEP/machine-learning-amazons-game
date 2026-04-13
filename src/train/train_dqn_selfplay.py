@@ -41,6 +41,11 @@ class DQNTrainConfig:
     per_beta_end: float = 1.0
     per_beta_anneal_steps: int = 100_000
     n_step: int = 1
+    prune_top_k: int = 0
+    prune_keep_ratio: float = 1.0
+    reward_mobility_weight: float = 0.0
+    reward_center_weight: float = 0.0
+    metadata_json: str = "results/runs/train_dqn_meta.json"
 
 
 def train_dqn_selfplay(config: DQNTrainConfig | None = None) -> Dict[str, str]:
@@ -50,7 +55,16 @@ def train_dqn_selfplay(config: DQNTrainConfig | None = None) -> Dict[str, str]:
     np.random.seed(cfg.seed)
     torch.manual_seed(cfg.seed)
 
-    env = MiniAmazonsEnv(AmazonsConfig(size=cfg.size, max_turns=cfg.max_turns))
+    from src.train.innovation_utils import prune_actions_by_score, save_run_metadata
+
+    env = MiniAmazonsEnv(
+        AmazonsConfig(
+            size=cfg.size,
+            max_turns=cfg.max_turns,
+            reward_mobility_weight=cfg.reward_mobility_weight,
+            reward_center_weight=cfg.reward_center_weight,
+        )
+    )
     a0 = DQNAmazonsAgent(
         size=cfg.size,
         gamma=cfg.gamma,
@@ -94,6 +108,7 @@ def train_dqn_selfplay(config: DQNTrainConfig | None = None) -> Dict[str, str]:
     Path(cfg.log_csv).parent.mkdir(parents=True, exist_ok=True)
 
     rows = []
+    wins0 = 0
     pbar = TerminalProgressBar(total=cfg.episodes, title="DQN")
 
     for ep in range(1, cfg.episodes + 1):
@@ -106,6 +121,13 @@ def train_dqn_selfplay(config: DQNTrainConfig | None = None) -> Dict[str, str]:
         while not done:
             p = env.current_player
             legal = env.legal_actions(p)
+            legal = prune_actions_by_score(
+                env,
+                p,
+                legal,
+                top_k=cfg.prune_top_k,
+                keep_ratio=cfg.prune_keep_ratio,
+            )
 
             if p == 0:
                 action = a0.select_action(state, legal, training=True)
@@ -128,6 +150,8 @@ def train_dqn_selfplay(config: DQNTrainConfig | None = None) -> Dict[str, str]:
         a0.decay_epsilon()
         a1.decay_epsilon()
 
+        if info["winner"] == 0:
+            wins0 += 1
         rows.append(
             {
                 "episode": ep,
@@ -136,6 +160,8 @@ def train_dqn_selfplay(config: DQNTrainConfig | None = None) -> Dict[str, str]:
                 "reward_1": round(total_r1, 4),
                 "epsilon_0": round(a0.epsilon, 6),
                 "epsilon_1": round(a1.epsilon, 6),
+                "turns": env.turns,
+                "win_rate_0_running": round(wins0 / ep, 6),
             }
         )
         pbar.update(ep, extra=f"eps0={a0.epsilon:.3f} winner={info['winner']}")
@@ -148,9 +174,28 @@ def train_dqn_selfplay(config: DQNTrainConfig | None = None) -> Dict[str, str]:
     a1.save(m1)
 
     with open(cfg.log_csv, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=["episode", "winner", "reward_0", "reward_1", "epsilon_0", "epsilon_1"])
+        writer = csv.DictWriter(
+            f,
+            fieldnames=[
+                "episode",
+                "winner",
+                "reward_0",
+                "reward_1",
+                "epsilon_0",
+                "epsilon_1",
+                "turns",
+                "win_rate_0_running",
+            ],
+        )
         writer.writeheader()
         writer.writerows(rows)
 
-    return {"model0": m0, "model1": m1, "log": cfg.log_csv}
+    run_id = save_run_metadata(
+        cfg.metadata_json,
+        run_type="train_dqn_selfplay",
+        config=cfg,
+        extra={"model0": m0, "model1": m1, "log_csv": cfg.log_csv},
+    )
+
+    return {"model0": m0, "model1": m1, "log": cfg.log_csv, "run_id": run_id, "meta": cfg.metadata_json}
 
