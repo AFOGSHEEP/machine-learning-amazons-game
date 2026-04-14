@@ -6,8 +6,6 @@ import time
 import json
 import subprocess
 from typing import Any
-from urllib import request
-from urllib.error import URLError
 
 import streamlit as st
 import torch
@@ -110,37 +108,18 @@ def moving_average(series: pd.Series, window: int = 20) -> pd.Series:
     return series.rolling(window=window, min_periods=1).mean()
 
 
-def call_ollama_review(
-    game_rows: list[dict[str, Any]],
-    model_name: str,
-    endpoint: str = "http://127.0.0.1:11434/api/generate",
-) -> str:
-    if not game_rows:
-        return "暂无对局数据可分析。"
-    recent = game_rows[-20:]
-    prompt = (
-        "你是强化学习棋类实验评审。请基于以下 Mini Amazons 对局日志，"
-        "给出：1) 双方策略特点 2) 关键失误回合 3) 可执行改进建议（3条以内）。\n"
-        f"日志: {json.dumps(recent, ensure_ascii=False)}"
-    )
-    payload = {
-        "model": model_name,
-        "prompt": prompt,
-        "stream": False,
-    }
-    req = request.Request(
-        endpoint,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        with request.urlopen(req, timeout=60) as resp:
-            text = resp.read().decode("utf-8")
-            data = json.loads(text)
-            return str(data.get("response", "")).strip() or "模型未返回有效内容。"
-    except URLError as e:
-        return f"Ollama 请求失败: {e}"
+def list_figure_paths() -> list[str]:
+    root = ROOT / "results" / "figures"
+    if not root.exists():
+        return []
+    out: list[str] = []
+    for ext in ("*.png", "*.jpg", "*.jpeg", "*.webp"):
+        for p in root.rglob(ext):
+            try:
+                out.append(str(p.relative_to(ROOT)).replace("\\", "/"))
+            except ValueError:
+                out.append(str(p))
+    return sorted(set(out))
 
 
 def load_strength_table() -> tuple[dict[str, float], str]:
@@ -611,7 +590,7 @@ def main():
             st.line_chart(mdf.set_index("turn")[["mobility_gap", "block_ratio"]], height=220)
 
         st.markdown("---")
-        st.subheader("案例追溯与 LLM 评审")
+        st.subheader("案例追溯")
         case_name = st.text_input("案例文件名", value="latest_case.json")
         if st.button("保存案例到 results/cases"):
             out = ROOT / "results" / "cases" / case_name
@@ -625,12 +604,6 @@ def main():
                 steps=st.session_state.log,
             )
             st.success(f"案例已保存，case_id={case_id}")
-
-        ollama_model = st.text_input("Ollama 模型名", value="qwen2.5:7b")
-        if st.button("用 Ollama 点评本局"):
-            with st.spinner("正在请求本地 Ollama..."):
-                review = call_ollama_review(st.session_state.log, ollama_model)
-            st.text_area("模型点评", value=review, height=220)
     elif page == "训练监控":
         st.subheader("训练监控")
         logs = list_training_logs()
@@ -669,6 +642,38 @@ def main():
                         st.line_chart(pd.DataFrame({"turns_ma20": moving_average(x["turns"], 20)}), height=220)
             except Exception as e:
                 st.error(f"读取训练日志失败: {e}")
+        st.markdown("---")
+        st.subheader("图像结果浏览")
+        figures = list_figure_paths()
+        if not figures:
+            st.info("未发现图像，请先运行绘图任务。")
+        else:
+            keyword = st.text_input("按关键词过滤（文件名）", value="")
+            fig_items: list[tuple[str, float]] = []
+            for rel in figures:
+                if keyword and keyword.lower() not in rel.lower():
+                    continue
+                p = ROOT / rel
+                try:
+                    fig_items.append((rel, p.stat().st_mtime))
+                except OSError:
+                    fig_items.append((rel, 0.0))
+            fig_items.sort(key=lambda x: x[1], reverse=True)
+            filtered_figs = [x[0] for x in fig_items]
+            if not filtered_figs:
+                st.warning("没有匹配该关键词的图像。")
+            else:
+                default_figs = filtered_figs[: min(6, len(filtered_figs))]
+                selected_figs = st.multiselect("选择要显示的图", filtered_figs, default=default_figs)
+                col_n = st.slider("每行显示列数", min_value=1, max_value=4, value=2, step=1)
+                if selected_figs:
+                    cols = st.columns(col_n)
+                    for i, rel in enumerate(selected_figs):
+                        p = ROOT / rel
+                        with cols[i % col_n]:
+                            st.image(str(p), caption=rel, use_container_width=True)
+            if st.button("刷新图像列表"):
+                st.rerun()
     else:
         st.subheader("一键实验")
         st.caption("所有任务都在后台执行，完成后可在训练监控和 results 目录查看产物。")
@@ -715,7 +720,7 @@ def main():
 
         st.markdown("---")
         st.write("**2) 一键 Arena 对战**")
-        arena_games = st.number_input("Arena 对战局数", min_value=20, max_value=2000, value=300, step=20)
+        arena_games = st.number_input("Arena 对战局数", min_value=20, max_value=50000, value=300, step=20)
         if st.button("启动 Arena 对战（rnd/heu/mm/dqn）"):
             cmd = [
                 sys.executable,
@@ -777,7 +782,7 @@ def main():
         st.markdown("---")
         st.write("**4) 单按钮全流程（训练 -> Arena -> 自动出图）**")
         p_episodes = st.number_input("全流程训练局数", min_value=100, max_value=5000, value=400, step=50)
-        p_games = st.number_input("全流程 Arena 局数", min_value=50, max_value=2000, value=200, step=50)
+        p_games = st.number_input("全流程 Arena 局数", min_value=50, max_value=50000, value=200, step=50)
         p_prefix = st.text_input("全流程图名前缀", value="arena_pipeline")
         if st.button("启动全流程"):
             cmd = [
